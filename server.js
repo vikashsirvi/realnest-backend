@@ -95,23 +95,58 @@ if (!fs.existsSync(uploadsDir)) {
 const app = express()
 const server = http.createServer(app)
 
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  'http://localhost:3000',
+  'http://localhost:3001',
+]
+
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL,
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
 })
 
 app.use(
-  helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } })
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
 )
+
 app.use(compression())
+
 app.use(
-  cors({ origin: process.env.CLIENT_URL, credentials: true })
+  cors({
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true)
+      } else {
+        callback(new Error('Not allowed by CORS'))
+      }
+    },
+    credentials: true,
+    methods: [
+      'GET',
+      'POST',
+      'PUT',
+      'PATCH',
+      'DELETE',
+      'OPTIONS',
+    ],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+    ],
+  })
 )
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+
+app.use(express.json({ limit: '10mb' }))
+app.use(
+  express.urlencoded({ extended: true, limit: '10mb' })
+)
 
 app.use(
   session({
@@ -123,12 +158,16 @@ app.use(
       secure: process.env.NODE_ENV === 'production',
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000,
+      sameSite:
+        process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     },
   })
 )
 
 configurePassport()
 app.use(passport.initialize())
+app.use(passport.session())
+
 app.use(
   '/uploads',
   express.static(path.join(__dirname, 'uploads'))
@@ -144,6 +183,16 @@ app.get('/', (req, res) => {
     message: 'RealNest API is running...',
     version: '1.0.0',
     environment: process.env.NODE_ENV,
+    timestamp: new Date().toISOString(),
+  })
+})
+
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Server is healthy',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
   })
 })
 
@@ -160,6 +209,13 @@ app.use('/api/newsletter', require('./routes/newsletterRoutes'))
 
 app.use(errorMiddleware)
 
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Route ${req.originalUrl} not found`,
+  })
+})
+
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`)
 
@@ -169,11 +225,14 @@ io.on('connection', (socket) => {
   })
 
   socket.on('send_message', (data) => {
-    socket.to(data.conversationId).emit('receive_message', data)
+    socket
+      .to(data.conversationId)
+      .emit('receive_message', data)
   })
 
   socket.on('leave_room', (room) => {
     socket.leave(room)
+    console.log(`Socket ${socket.id} left room: ${room}`)
   })
 
   socket.on('disconnect', () => {
@@ -188,4 +247,14 @@ server.listen(PORT, async () => {
     `Server running in ${process.env.NODE_ENV} mode on port ${PORT}`
   )
   await seedAdmin()
+})
+
+process.on('unhandledRejection', (err) => {
+  console.error(`Unhandled Rejection: ${err.message}`)
+  server.close(() => process.exit(1))
+})
+
+process.on('uncaughtException', (err) => {
+  console.error(`Uncaught Exception: ${err.message}`)
+  process.exit(1)
 })
